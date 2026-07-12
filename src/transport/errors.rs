@@ -10,4 +10,6 @@ pub enum TransportError {
     BrokenPipe,
     #[error("Payload too large for transport")]
     PayloadTooLarge,
+    #[error("Encryption error occurred")]
+    EncryptionError,
 }

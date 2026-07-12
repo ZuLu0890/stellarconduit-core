@@ -75,6 +75,12 @@ mod signature_serde {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TopologyFlag {
     GoToSleep,
+    /// Device is in duty-cycled BLE mode (2% duty cycle).
+    LowPowerMode,
+    /// Device will enter deep sleep within the next 60s.
+    DeepSleepPending,
+    /// BLE Central MAC address has been rotated for privacy.
+    MacRotated,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,6 +118,10 @@ pub enum ProtocolMessage {
 
     /// A response containing missing messages requested via SyncRequest
     SyncResponse(SyncResponse),
+
+    /// BLE peer identity handshake — the first message a Central sends after
+    /// connecting to a Peripheral, containing the Central's public key.
+    Handshake { pubkey: [u8; 32] },
 }
 
 impl ProtocolMessage {

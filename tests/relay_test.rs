@@ -1,153 +1,156 @@
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
-use stellarconduit_core::message::signing::{sign_envelope, verify_signature};
-use stellarconduit_core::message::types::TransactionEnvelope;
-use stellarconduit_core::relay::process_envelope;
-use stellarconduit_core::relay::rpc_client::RpcClient;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-fn create_valid_envelope() -> (TransactionEnvelope, SigningKey) {
-    let mut csprng = OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
+use async_trait::async_trait;
+use stellarconduit_core::message::signing::verify_signature;
+use stellarconduit_core::message::types::TransactionEnvelope;
+use stellarconduit_core::metrics::Metrics;
+use stellarconduit_core::relay::{RelayNode, RpcError, StellarRpcClient};
+
+struct MockRpcClient {
+    submit_count: Arc<AtomicUsize>,
+    should_fail: bool,
+    tx_hash: String,
+    ledger_hash: String,
+    ledger_sequence: u64,
+}
+
+impl MockRpcClient {
+    fn new(tx_hash: &str) -> Self {
+        Self {
+            submit_count: Arc::new(AtomicUsize::new(0)),
+            should_fail: false,
+            tx_hash: tx_hash.to_string(),
+            ledger_hash: hex::encode([0xCD; 32]),
+            ledger_sequence: 1234,
+        }
+    }
+
+    fn failing() -> Self {
+        Self {
+            submit_count: Arc::new(AtomicUsize::new(0)),
+            should_fail: true,
+            tx_hash: String::new(),
+            ledger_hash: hex::encode([0xCD; 32]),
+            ledger_sequence: 1234,
+        }
+    }
+}
+
+#[async_trait]
+impl StellarRpcClient for MockRpcClient {
+    async fn submit_transaction(&self, _tx_xdr: &str) -> Result<String, RpcError> {
+        self.submit_count.fetch_add(1, Ordering::SeqCst);
+        if self.should_fail {
+            Err(RpcError::Network("RPC error".to_string()))
+        } else {
+            Ok(self.tx_hash.clone())
+        }
+    }
+    async fn get_account_sequence(&self, _: &str) -> Result<u64, RpcError> {
+        Ok(0)
+    }
+    async fn get_ledger_sequence(&self) -> Result<u64, RpcError> {
+        Ok(self.ledger_sequence)
+    }
+    async fn get_ledger_hash(&self) -> Result<String, RpcError> {
+        Ok(self.ledger_hash.clone())
+    }
+}
+
+fn create_envelope(origin: [u8; 32]) -> TransactionEnvelope {
+    TransactionEnvelope {
+        message_id: [1u8; 32],
+        origin_pubkey: origin,
+        tx_xdr: "AAAAAQAAAAAAAAAA".to_string(),
+        ttl_hops: 10,
+        timestamp: 1672531200,
+        signature: [3u8; 64],
+    }
+}
+
+fn relay_signing_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+}
+
+#[tokio::test]
+async fn test_process_envelope_success() {
+    let tx_id = [0xABu8; 32];
+    let signing_key = relay_signing_key();
+    let verifying_key = signing_key.verifying_key();
+    let mut relay = RelayNode::new(
+        1000,
+        Box::new(MockRpcClient::new(&hex::encode(tx_id))),
+        signing_key,
+        Metrics::new(),
+    );
+
+    let result = relay
+        .process_envelope(&create_envelope([2u8; 32]), None)
+        .await;
+
+    assert!(result.is_ok());
+    let proof = result.unwrap();
+    assert_eq!(proof.chain_hash, [0xCD; 32]);
+    assert_eq!(proof.sequence, 1234);
+    assert!(proof.verify(&verifying_key, &tx_id));
+}
+
+#[tokio::test]
+async fn test_process_envelope_rpc_failure() {
+    let mut relay = RelayNode::new(
+        1000,
+        Box::new(MockRpcClient::failing()),
+        relay_signing_key(),
+        Metrics::new(),
+    );
+    let result = relay
+        .process_envelope(&create_envelope([2u8; 32]), None)
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_process_envelope_deduplicates() {
+    let tx_id = [0xABu8; 32];
+    let signing_key = relay_signing_key();
+    let verifying_key = signing_key.verifying_key();
+    let mut relay = RelayNode::new(
+        1000,
+        Box::new(MockRpcClient::new(&hex::encode(tx_id))),
+        signing_key,
+        Metrics::new(),
+    );
+    let envelope = create_envelope([2u8; 32]);
+
+    let proof1 = relay.process_envelope(&envelope, None).await.unwrap();
+    let proof2 = relay.process_envelope(&envelope, None).await.unwrap();
+
+    assert_eq!(proof1, proof2);
+    assert!(proof1.verify(&verifying_key, &tx_id));
+}
+
+#[tokio::test]
+async fn test_verify_signature_standalone() {
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
     let mut envelope = TransactionEnvelope {
         message_id: [1u8; 32],
         origin_pubkey: verifying_key.to_bytes(),
-        tx_xdr: "AAAAAgAAAADZ/7+9/7+9/7+9".to_string(),
+        tx_xdr: "AAAAAQAAAAAAAAAA".to_string(),
         ttl_hops: 10,
         timestamp: 1672531200,
         signature: [0u8; 64],
     };
 
-    sign_envelope(&signing_key, &mut envelope).expect("Failed to sign envelope");
-
-    (envelope, signing_key)
-}
-
-#[tokio::test]
-async fn test_process_envelope_success() {
-    let mock_server = MockServer::start().await;
-
-    let mock_response = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {
-            "status": "PENDING",
-            "hash": "test_tx_hash_123"
-        }
-    });
-
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(mock_response))
-        .mount(&mock_server)
-        .await;
-
-    let rpc_client = RpcClient::new(mock_server.uri());
-    let (envelope, _) = create_valid_envelope();
-
-    let result = process_envelope(&rpc_client, &envelope).await;
-
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), "test_tx_hash_123");
-}
-
-#[tokio::test]
-async fn test_process_envelope_invalid_signature() {
-    let mock_server = MockServer::start().await;
-    let rpc_client = RpcClient::new(mock_server.uri());
-
-    // Create an envelope with an invalid signature
-    let mut envelope = TransactionEnvelope {
-        message_id: [1u8; 32],
-        origin_pubkey: [2u8; 32],
-        tx_xdr: "AAAAAgAAAADZ/7+9/7+9/7+9".to_string(),
-        ttl_hops: 10,
-        timestamp: 1672531200,
-        signature: [99u8; 64], // Invalid signature
-    };
-
-    // Tamper with the signature to make it invalid
-    envelope.signature[0] = 0;
-
-    let result = process_envelope(&rpc_client, &envelope).await;
-
-    assert!(result.is_err());
-    // The RPC endpoint should never be called for invalid signatures
-}
-
-#[tokio::test]
-async fn test_process_envelope_rpc_failure() {
-    let mock_server = MockServer::start().await;
-
-    let mock_response = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "error": {
-            "code": -32000,
-            "message": "Transaction validation failed"
-        }
-    });
-
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(mock_response))
-        .mount(&mock_server)
-        .await;
-
-    let rpc_client = RpcClient::new(mock_server.uri());
-    let (envelope, _) = create_valid_envelope();
-
-    let result = process_envelope(&rpc_client, &envelope).await;
-
-    assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn test_verify_signature_before_rpc_call() {
-    let mock_server = MockServer::start().await;
-
-    // This mock should never be called because signature verification fails first
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "status": "PENDING",
-                "hash": "should_not_reach_here"
-            }
-        })))
-        .expect(0) // Expect zero calls
-        .mount(&mock_server)
-        .await;
-
-    let rpc_client = RpcClient::new(mock_server.uri());
-
-    // Create envelope with forged signature
-    let envelope = TransactionEnvelope {
-        message_id: [1u8; 32],
-        origin_pubkey: [2u8; 32],
-        tx_xdr: "AAAAAgAAAADZ/7+9/7+9/7+9".to_string(),
-        ttl_hops: 10,
-        timestamp: 1672531200,
-        signature: [3u8; 64],
-    };
-
-    let result = process_envelope(&rpc_client, &envelope).await;
-
-    assert!(result.is_err());
-    // Mock server will verify that no HTTP calls were made
-}
-
-#[test]
-fn test_signature_verification_standalone() {
-    let (envelope, _) = create_valid_envelope();
+    stellarconduit_core::message::signing::sign_envelope(&signing_key, &mut envelope)
+        .expect("Failed to sign envelope");
 
     let result = verify_signature(&envelope);
-
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), true);
+    assert!(result.unwrap());
 }

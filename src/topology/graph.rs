@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::message::types::TopologyUpdate;
+use crate::topology::events::{TopologyEvent, TopologyEventBus};
 
 pub struct MeshGraph {
     edges: HashMap<[u8; 32], Vec<[u8; 32]>>,
@@ -17,7 +18,8 @@ impl MeshGraph {
         }
     }
 
-    pub fn apply_update(&mut self, update: &TopologyUpdate) {
+    pub fn apply_update(&mut self, update: &TopologyUpdate, event_bus: Option<&TopologyEventBus>) {
+        let prev_count = self.node_count();
         let origin = update.origin_pubkey;
         let mut set: HashSet<[u8; 32]> = HashSet::new();
         for peer in update.directly_connected_peers.iter() {
@@ -29,6 +31,24 @@ impl MeshGraph {
         list.sort_unstable();
         self.edges.insert(origin, list);
         self.last_updated.insert(origin, Instant::now());
+
+        if let Some(bus) = event_bus {
+            bus.publish(TopologyEvent::PeerUpdated {
+                pubkey: origin,
+                hops_to_relay: update.hops_to_relay,
+                neighbor_count: self.edges.get(&origin).map_or(0, |v| v.len()),
+            });
+            let new_count = self.node_count();
+            if prev_count != new_count && prev_count > 0 {
+                let ratio = (new_count as f64 / prev_count as f64 - 1.0).abs();
+                if ratio >= 0.20 {
+                    bus.publish(TopologyEvent::MeshSizeChanged {
+                        previous: prev_count,
+                        current: new_count,
+                    });
+                }
+            }
+        }
     }
 
     pub fn get_neighbors(&self, target: &[u8; 32]) -> Option<&Vec<[u8; 32]>> {
@@ -42,7 +62,11 @@ impl MeshGraph {
 
     /// Remove all edges whose last update is older than `timeout`.
     /// Returns the number of nodes pruned.
-    pub fn prune_stale_edges(&mut self, timeout: Duration) -> usize {
+    pub fn prune_stale_edges(
+        &mut self,
+        timeout: Duration,
+        event_bus: Option<&TopologyEventBus>,
+    ) -> usize {
         let now = Instant::now();
         let stale_keys: Vec<[u8; 32]> = self
             .last_updated
@@ -51,11 +75,30 @@ impl MeshGraph {
             .map(|(k, _)| *k)
             .collect();
 
+        let prev_count = self.node_count();
         let pruned = stale_keys.len();
-        for key in stale_keys {
-            self.edges.remove(&key);
-            self.last_updated.remove(&key);
+
+        for key in &stale_keys {
+            self.edges.remove(key);
+            self.last_updated.remove(key);
         }
+
+        if let Some(bus) = event_bus {
+            for key in &stale_keys {
+                bus.publish(TopologyEvent::PeerPruned { pubkey: *key });
+            }
+            let new_count = self.node_count();
+            if prev_count != new_count && prev_count > 0 {
+                let ratio = (prev_count - new_count) as f64 / prev_count as f64;
+                if ratio >= 0.20 {
+                    bus.publish(TopologyEvent::MeshSizeChanged {
+                        previous: prev_count,
+                        current: new_count,
+                    });
+                }
+            }
+        }
+
         pruned
     }
 
@@ -92,7 +135,7 @@ mod tests {
             hops_to_relay: 5,
             topology_flags: vec![],
         };
-        g.apply_update(&update);
+        g.apply_update(&update, None);
         let neighbors = g.get_neighbors(&origin).cloned().unwrap();
         assert!(neighbors.iter().all(|p| *p != origin));
         assert_eq!(neighbors.len(), 1);
@@ -108,9 +151,9 @@ mod tests {
             hops_to_relay: 1,
             topology_flags: vec![],
         };
-        g.apply_update(&update);
+        g.apply_update(&update, None);
         g.backdate_edge(&pk(1), Duration::from_secs(3700));
-        let pruned = g.prune_stale_edges(Duration::from_secs(3600));
+        let pruned = g.prune_stale_edges(Duration::from_secs(3600), None);
         assert_eq!(pruned, 1);
         assert_eq!(g.node_count(), 0);
     }
@@ -124,9 +167,9 @@ mod tests {
             hops_to_relay: 1,
             topology_flags: vec![],
         };
-        g.apply_update(&update);
+        g.apply_update(&update, None);
         // Edge is fresh — should NOT be pruned
-        let pruned = g.prune_stale_edges(Duration::from_secs(3600));
+        let pruned = g.prune_stale_edges(Duration::from_secs(3600), None);
         assert_eq!(pruned, 0);
         assert_eq!(g.node_count(), 1);
     }

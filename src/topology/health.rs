@@ -85,7 +85,7 @@ impl StatePruner {
     pub async fn prune_graph_edges(&self) {
         let pruned = {
             let mut graph = self.graph.lock().await;
-            graph.prune_stale_edges(EDGE_TIMEOUT)
+            graph.prune_stale_edges(EDGE_TIMEOUT, None)
         };
         if pruned > 0 {
             log::debug!("Pruner: removed {} stale graph edge(s)", pruned);
@@ -196,12 +196,15 @@ mod tests {
 
         {
             let mut g = graph.lock().await;
-            g.apply_update(&TopologyUpdate {
-                origin_pubkey: pk(1),
-                directly_connected_peers: vec![pk(2)],
-                hops_to_relay: 1,
-                topology_flags: vec![],
-            });
+            g.apply_update(
+                &TopologyUpdate {
+                    origin_pubkey: pk(1),
+                    directly_connected_peers: vec![pk(2)],
+                    hops_to_relay: 1,
+                    topology_flags: vec![],
+                },
+                None,
+            );
             // Backdate the edge to 2 hours ago
             g.backdate_edge(&pk(1), Duration::from_secs(7200));
         }
@@ -224,12 +227,15 @@ mod tests {
 
         {
             let mut g = graph.lock().await;
-            g.apply_update(&TopologyUpdate {
-                origin_pubkey: pk(3),
-                directly_connected_peers: vec![pk(4)],
-                hops_to_relay: 2,
-                topology_flags: vec![],
-            });
+            g.apply_update(
+                &TopologyUpdate {
+                    origin_pubkey: pk(3),
+                    directly_connected_peers: vec![pk(4)],
+                    hops_to_relay: 2,
+                    topology_flags: vec![],
+                },
+                None,
+            );
             // No backdating — edge is fresh
         }
 

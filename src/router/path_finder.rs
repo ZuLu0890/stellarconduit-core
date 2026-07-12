@@ -90,8 +90,8 @@ mod tests {
         let mut hc = HopCounter::new();
 
         // peer 1 is 10 hops away, peer 2 is 2 hops away, peer 3 is unknown
-        hc.update_distance(pk(1), 10);
-        hc.update_distance(pk(2), 2);
+        hc.update_distance(pk(1), 10, None);
+        hc.update_distance(pk(2), 2, None);
 
         let active = vec![pk(1), pk(2), pk(3)];
 
@@ -114,20 +114,26 @@ mod tests {
         // pk(2) -> pk(3) -> pk(4) (which is 1 hop from relay)
 
         // build graph
-        graph.apply_update(&TopologyUpdate {
-            origin_pubkey: pk(2),
-            directly_connected_peers: vec![pk(3)],
-            hops_to_relay: 255, // unknown at origin
-            topology_flags: vec![],
-        });
-        graph.apply_update(&TopologyUpdate {
-            origin_pubkey: pk(3),
-            directly_connected_peers: vec![pk(4)],
-            hops_to_relay: 255,
-            topology_flags: vec![],
-        });
+        graph.apply_update(
+            &TopologyUpdate {
+                origin_pubkey: pk(2),
+                directly_connected_peers: vec![pk(3)],
+                hops_to_relay: 255, // unknown at origin
+                topology_flags: vec![],
+            },
+            None,
+        );
+        graph.apply_update(
+            &TopologyUpdate {
+                origin_pubkey: pk(3),
+                directly_connected_peers: vec![pk(4)],
+                hops_to_relay: 255,
+                topology_flags: vec![],
+            },
+            None,
+        );
 
-        hc.update_distance(pk(4), 1); // pk(4) is 1 hop away
+        hc.update_distance(pk(4), 1, None); // pk(4) is 1 hop away
 
         let active = vec![pk(1), pk(2)];
         let ranked = pf.rank_next_hops(&graph, &hc, &active);

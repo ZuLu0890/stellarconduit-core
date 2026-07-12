@@ -7,8 +7,8 @@ use std::ptr;
 
 use ed25519_dalek::SigningKey;
 
-use crate::message::signing::sign_envelope;
-use crate::message::types::{ProtocolMessage, TransactionEnvelope};
+use crate::message::envelope::EnvelopeBuilder;
+use crate::message::types::ProtocolMessage;
 
 /// Initializes a new node identity, returning the public key as a hex string.
 /// Caller is responsible for calling `sc_free_string()` on the returned pointer.
@@ -56,27 +56,7 @@ pub extern "C" fn sc_create_envelope(
     let signing_key = SigningKey::from_bytes(&seed_bytes);
     let origin_pubkey = signing_key.verifying_key().to_bytes();
 
-    // Create a message ID
-    let mut message_id = [0u8; 32];
-    message_id[0..4].copy_from_slice(&origin_pubkey[0..4]);
-    // A simplified deterministic ID for the envelope.
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut envelope = TransactionEnvelope {
-        message_id,
-        origin_pubkey,
-        tx_xdr,
-        ttl_hops: 10,
-        timestamp,
-        signature: [0u8; 64],
-    };
-
-    if sign_envelope(&signing_key, &mut envelope).is_err() {
-        return ptr::null_mut();
-    }
+    let envelope = EnvelopeBuilder::new(origin_pubkey, tx_xdr).build(&signing_key);
 
     let msg = ProtocolMessage::Transaction(envelope);
     let bytes = match msg.to_bytes() {

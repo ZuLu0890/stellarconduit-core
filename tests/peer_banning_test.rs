@@ -10,6 +10,7 @@ use stellarconduit_core::gossip::protocol::process_transaction_envelope;
 use stellarconduit_core::gossip::strike_tracker::StrikeTracker;
 use stellarconduit_core::message::signing::sign_envelope;
 use stellarconduit_core::message::types::TransactionEnvelope;
+use stellarconduit_core::metrics::Metrics;
 use stellarconduit_core::peer::identity::PeerIdentity;
 use stellarconduit_core::transport::unified::{TransportManager, TransportPreference};
 
@@ -53,11 +54,14 @@ async fn test_strike_tracking_banning() {
     let peer_identity = PeerIdentity::new(keypair.verifying_key().to_bytes());
 
     // First 3 failures should not ban
+    let metrics = Metrics::new();
     let result1 = process_transaction_envelope(
         &invalid_env1,
         &mut strike_tracker,
         peer_list.clone(),
         transport_manager.clone(),
+        None,
+        &metrics,
     )
     .await;
     assert!(result1.is_ok());
@@ -68,6 +72,8 @@ async fn test_strike_tracking_banning() {
         &mut strike_tracker,
         peer_list.clone(),
         transport_manager.clone(),
+        None,
+        &metrics,
     )
     .await;
     assert!(result2.is_ok());
@@ -78,6 +84,8 @@ async fn test_strike_tracking_banning() {
         &mut strike_tracker,
         peer_list.clone(),
         transport_manager.clone(),
+        None,
+        &metrics,
     )
     .await;
     assert!(result3.is_ok());
@@ -89,6 +97,8 @@ async fn test_strike_tracking_banning() {
         &mut strike_tracker,
         peer_list.clone(),
         transport_manager.clone(),
+        None,
+        &metrics,
     )
     .await;
     assert!(result4.is_err()); // Should return Err with peer identity
@@ -114,12 +124,15 @@ async fn test_valid_signature_clears_strikes() {
     // Record 2 failures
     let invalid_env1 = create_invalid_envelope(&keypair, "invalid1");
     let invalid_env2 = create_invalid_envelope(&keypair, "invalid2");
+    let metrics = Metrics::new();
 
     process_transaction_envelope(
         &invalid_env1,
         &mut strike_tracker,
         peer_list.clone(),
         transport_manager.clone(),
+        None,
+        &metrics,
     )
     .await
     .unwrap();
@@ -128,6 +141,8 @@ async fn test_valid_signature_clears_strikes() {
         &mut strike_tracker,
         peer_list.clone(),
         transport_manager.clone(),
+        None,
+        &metrics,
     )
     .await
     .unwrap();
@@ -141,6 +156,8 @@ async fn test_valid_signature_clears_strikes() {
         &mut strike_tracker,
         peer_list.clone(),
         transport_manager.clone(),
+        None,
+        &metrics,
     )
     .await
     .unwrap();
@@ -184,6 +201,7 @@ async fn test_multiple_peers_separate_strikes() {
     let peer1 = PeerIdentity::new(keypair1.verifying_key().to_bytes());
     let peer2 = PeerIdentity::new(keypair2.verifying_key().to_bytes());
 
+    let metrics = Metrics::new();
     // Peer1 gets 4 failures (should be banned)
     for _ in 0..4 {
         let invalid = create_invalid_envelope(&keypair1, "invalid");
@@ -192,6 +210,8 @@ async fn test_multiple_peers_separate_strikes() {
             &mut strike_tracker,
             peer_list.clone(),
             transport_manager.clone(),
+            None,
+            &metrics,
         )
         .await
         .ok();
@@ -205,6 +225,8 @@ async fn test_multiple_peers_separate_strikes() {
             &mut strike_tracker,
             peer_list.clone(),
             transport_manager.clone(),
+            None,
+            &metrics,
         )
         .await
         .ok();
